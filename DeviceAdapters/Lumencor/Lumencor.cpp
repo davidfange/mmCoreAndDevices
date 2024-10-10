@@ -64,13 +64,16 @@ MODULE_API void DeleteDevice(MM::Device* pDevice)
 LightEngine::LightEngine() :
    initialized(false),
 	engine(0),
-	shutterState(false)
+	shutterState(false),
+	warmUpTimeOutMs(5000)
 {
    InitializeDefaultErrorMessages();
 
 	   // set device specific error messages
    SetErrorText(ERR_INIT, "Light engine initialization error, see log file for details");
    SetErrorText(ERR_INTERNAL, "Internal driver error, see log file for details");
+   SetErrorText(ERR_STATUS_CHANGE_FORBIDDEN, "Manually setting the light engine to standby is not possible");
+   SetErrorText(ERR_UNABLE_TO_WAKEUP, "Unable to wakeup Light Engine from standby");
 
                                                                              
    // create pre-initialization properties                                   
@@ -248,6 +251,31 @@ int LightEngine::Initialize()
    // switch all channels off on startup
    SetProperty(MM::g_Keyword_State, "0");
 
+   // Status
+   // Not avaible in legacy mode
+   if (!legacy) {
+	   pAct = new CPropertyAction(this, &LightEngine::OnStatus);
+	   ret = CreateProperty(g_Keyword_Status, g_Keyword_Status_OK, MM::String, false, pAct);
+	   if (ret != DEVICE_OK)
+		   return ret;
+
+	   AddAllowedValue(g_Keyword_Status, g_Keyword_Status_Standby);
+	   AddAllowedValue(g_Keyword_Status, g_Keyword_Status_OK);
+
+	   SetProperty(g_Keyword_Status, g_Keyword_Status_OK);
+   }
+
+   // Time out for waiting on light engine warm up after re-activating from standby.
+   // Not available in legacy mode.
+   if (!legacy) {
+	   pAct = new CPropertyAction(this, &LightEngine::OnWarmUpTimeOutMs);
+	   ret = CreateProperty(g_Keyword_WarmupTimeOutMs, CDeviceUtils::ConvertToString(warmUpTimeOutMs), MM::Integer, false, pAct);
+	   if (ret != DEVICE_OK)
+		   return ret;
+
+	   SetProperty(g_Keyword_WarmupTimeOutMs, CDeviceUtils::ConvertToString(warmUpTimeOutMs));
+   }
+
    UpdateStatus();
 
    initialized = true;
@@ -357,6 +385,45 @@ int LightEngine::OnState(MM::PropertyBase* pProp, MM::ActionType eAct)
    return DEVICE_OK;
 }
 
+
+int LightEngine::OnStatus(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+	if (eAct == MM::BeforeGet)
+	{
+		int statuscode;
+		int ret = lum_getStatusCode(engine, &statuscode);
+		if (ret != DEVICE_OK)
+			return RetrieveError(engine);
+
+		if (statuscode == 0) {
+			pProp->Set(g_Keyword_Status_OK);
+			return DEVICE_OK;
+		}
+		else {
+			if (statuscode == 6 || statuscode == 7) {
+				pProp->Set(g_Keyword_Status_Standby);
+				return DEVICE_OK;
+			}
+			else {
+				return RetrieveError(engine);
+			}
+		}
+	}
+	else if (eAct == MM::AfterSet)
+	{
+		std::string status;
+		pProp->Get(status);
+
+		if (strcmp(status.c_str(), g_Keyword_Status_Standby) == 0) {
+			pProp->Set(g_Keyword_Status_OK);
+			return ERR_STATUS_CHANGE_FORBIDDEN;
+		}
+
+		return WakeUpAndWaitForWarmup();
+	}
+
+	return DEVICE_OK;
+}
 // *****************************************************************************
 // Property handlers
 // *****************************************************************************
@@ -442,6 +509,25 @@ int LightEngine::OnChannelEnable(MM::PropertyBase* pProp, MM::ActionType eAct)
    return DEVICE_OK;
 }
 
+int LightEngine::OnWarmUpTimeOutMs(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+	if (eAct == MM::BeforeGet)
+	{
+		pProp->Set((long)warmUpTimeOutMs);
+		return DEVICE_OK;
+	}
+	else if (eAct == MM::AfterSet)
+	{
+		long timems;
+		pProp->Get(timems);
+		warmUpTimeOutMs = timems;
+		return DEVICE_OK;
+	}
+
+	return DEVICE_OK;
+}
+
+
 // Get error from light engine
 int LightEngine::RetrieveError(void* engine)
 {
@@ -495,4 +581,65 @@ int LightEngine::ApplyStates()
 	shutterState = true; // signals that shutter is now open
 
 	return DEVICE_OK;
+}
+
+int LightEngine::WakeUpAndWaitForWarmup()
+{
+	char response[20] = "";
+	int ret = lum_executeCommand(engine, "WAKEUP", response, 20);
+	if (ret != DEVICE_OK)
+		return RetrieveError(engine);
+
+	int statuscode;
+	ret = lum_getStatusCode(engine, &statuscode);
+	if (ret != DEVICE_OK)
+		return RetrieveError(engine);
+
+	if (statuscode == 0) {
+		return DEVICE_OK;
+	}
+
+	if (statuscode == 7) {
+
+		MM::TimeoutMs* timeOutTimer = new MM::TimeoutMs(GetCurrentMMTime(), warmUpTimeOutMs);
+		do {
+			CDeviceUtils::SleepMs(100);
+			ret = lum_getStatusCode(engine, &statuscode);
+			if (ret != DEVICE_OK)
+				return RetrieveError(engine);
+
+			if (timeOutTimer->expired(GetCurrentMMTime())) {
+				delete timeOutTimer;
+				return DEVICE_ERR;
+			}
+		} while (statuscode == 7);
+
+		delete timeOutTimer;
+
+		if (statuscode == 0) {
+			return DEVICE_OK;
+		}
+
+
+		if (statuscode == 6) {
+			//unable to wake-up from standby
+			return ERR_UNABLE_TO_WAKEUP;
+
+		}
+		else {
+			return RetrieveError(engine);
+		}
+
+
+	}
+	else {
+		if (statuscode == 6) {
+			//unable to wake-up from standby
+			return ERR_UNABLE_TO_WAKEUP;
+		}
+		else {
+			return RetrieveError(engine);
+		}
+
+	}
 }

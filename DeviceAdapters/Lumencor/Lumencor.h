@@ -35,6 +35,8 @@
 #define ERR_PARAMETER_ERROR          13002
 #define ERR_INIT							 13003
 #define ERR_INTERNAL						 13004
+#define ERR_STATUS_CHANGE_FORBIDDEN			 13005
+#define ERR_UNABLE_TO_WAKEUP				 13006
 
 static const char* g_LightEngine = "LightEngine";
 static const char* g_Prop_Connection = "Connection";
@@ -42,6 +44,10 @@ static const char* g_Prop_Model = "Model";
 static const char* g_Prop_ModelName = "LEModel";
 static const char* g_Prop_SerialNumber = "SerialNumber";
 static const char* g_Prop_FirmwareVersion = "FirmwareVersion";
+static const char* g_Keyword_Status = "Status";
+static const char* g_Keyword_Status_OK = "OK";
+static const char* g_Keyword_Status_Standby = "Standby";
+static const char* g_Keyword_WarmupTimeOutMs = "Warmup Timeout Ms";
 
 class LightEngineAPI;
 
@@ -75,6 +81,9 @@ public:
    int OnChannelEnable(MM::PropertyBase* pProp, MM::ActionType eAct);
    int OnChannelIntensity(MM::PropertyBase* pProp, MM::ActionType eAct);
 
+   int OnStatus(MM::PropertyBase* pProp, MM::ActionType eAct);
+   int OnWarmUpTimeOutMs(MM::PropertyBase* pProp, MM::ActionType eAct);
+
 private:
    bool initialized;
 	void* engine;
@@ -84,11 +93,13 @@ private:
 	std::map<std::string, int> channelLookup;
 	bool shutterState;
 	std::vector<bool> channelStates; // cache for channel states
+	int warmUpTimeOutMs;
 
 	int RetrieveError(void* engine);
 	int ZeroAll();
 	int ApplyStates();
 	int TurnAllOff();
+	int WakeUpAndWaitForWarmup();
 };
 
 
